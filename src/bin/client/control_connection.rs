@@ -1,9 +1,17 @@
 use std::collections::HashMap;
+use std::io;
+use std::sync::Arc;
 
 use ::thiserror::Error;
-use ::tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter, copy_bidirectional};
-use ::tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use ::tokio::io::{
+    AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter, ReadHalf,
+    WriteHalf, copy_bidirectional, split,
+};
 use ::tokio::net::{TcpStream, ToSocketAddrs};
+use ::tokio_rustls::TlsConnector;
+use ::tokio_rustls::client::TlsStream;
+use ::tokio_rustls::rustls::pki_types::ServerName;
+use ::tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use ripgrok::tunnel_specifier::TunnelSpecifier;
 use ripgrok::{ClientControlHello, ClientHello, ServerControlCommand, ServerControlHello};
 
@@ -15,18 +23,28 @@ enum ReadCommandError {
     InvalidCommand(#[from] serde_json::Error),
 }
 
-pub struct ControlConnection {
+pub struct ControlConnection<R, W>
+where
+    R: AsyncRead,
+    W: AsyncWrite,
+{
     server_addr: (String, u16),
-    reader: BufReader<OwnedReadHalf>,
-    writer: BufWriter<OwnedWriteHalf>,
+    reader: BufReader<ReadHalf<R>>,
+    // Writer is not currently used, but if we drop it from scope, the connection is terminated
+    // also, we're probably gonna use it in the future
+    _writer: BufWriter<WriteHalf<W>>,
     /// A map of server_port to client_port
     ports: HashMap<u16, u16>,
 }
 
-impl ControlConnection {
+impl<R, W> ControlConnection<R, W>
+where
+    R: AsyncRead,
+    W: AsyncWrite,
+{
     async fn execute_handshake(
-        reader: &mut BufReader<OwnedReadHalf>,
-        writer: &mut BufWriter<OwnedWriteHalf>,
+        reader: &mut BufReader<ReadHalf<impl AsyncRead>>,
+        writer: &mut BufWriter<WriteHalf<impl AsyncWrite>>,
         hello: &ClientControlHello,
     ) -> anyhow::Result<ServerControlHello> {
         writer
@@ -51,7 +69,7 @@ impl ControlConnection {
     }
 
     async fn read_command(
-        reader: &mut BufReader<OwnedReadHalf>,
+        reader: &mut BufReader<ReadHalf<R>>,
     ) -> Result<ServerControlCommand, ReadCommandError> {
         let mut command = String::new();
         match reader.read_line(&mut command).await {
@@ -98,53 +116,74 @@ impl ControlConnection {
                     server_port,
                 } => {
                     let client_port = match self.ports.get(&server_port) {
-                        Some(port) => port,
+                        Some(port) => port.clone(),
                         None => continue,
                     };
 
-                    let mut server_stream =
-                        match Self::open_tunnel_connection(self.server_addr.clone(), connection_id)
-                            .await
+                    let server_addr = self.server_addr.clone();
+
+                    tokio::spawn(async move {
+                        let mut server_stream =
+                            match Self::open_tunnel_connection(server_addr, connection_id).await {
+                                Ok(stream) => stream,
+                                Err(e) => {
+                                    tracing::error!(
+                                        ?e,
+                                        "Failed to connect to server to start tunnel connection."
+                                    );
+                                    return;
+                                }
+                            };
+
+                        let mut local_stream =
+                            match TcpStream::connect(("127.0.0.1", client_port)).await {
+                                Ok(stream) => stream,
+                                Err(e) => {
+                                    tracing::warn!(?e, "Failed to connect to local service");
+                                    return;
+                                }
+                            };
+
+                        if let Err(e) =
+                            copy_bidirectional(&mut server_stream, &mut local_stream).await
                         {
-                            Ok(stream) => stream,
-                            Err(e) => {
-                                tracing::error!(
-                                    ?e,
-                                    "Failed to connect to server to start tunnel connection."
-                                );
-                                continue;
-                            }
+                            tracing::warn!(
+                                ?e,
+                                "An error occurred while copying data between tunnel and local stream."
+                            );
                         };
-
-                    let mut local_stream =
-                        match TcpStream::connect(("127.0.0.1", *client_port)).await {
-                            Ok(stream) => stream,
-                            Err(e) => {
-                                tracing::warn!(?e, "Failed to connect to local service");
-                                continue;
-                            }
-                        };
-
-                    if let Err(e) = copy_bidirectional(&mut server_stream, &mut local_stream).await
-                    {
-                        tracing::warn!(
-                            ?e,
-                            "An error occurred while copying data between tunnel and local stream."
-                        );
-                        continue;
-                    };
+                    });
                 }
             }
         }
     }
+}
 
+impl ControlConnection<TlsStream<TcpStream>, TlsStream<TcpStream>> {
     pub async fn init(
         server_addr: (String, u16),
         tunnel_specifiers: Vec<TunnelSpecifier>,
     ) -> anyhow::Result<Self> {
-        let stream = TcpStream::connect(server_addr.clone()).await?;
+        let addr = std::net::ToSocketAddrs::to_socket_addrs(&server_addr)?
+            .next()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
 
-        let (r, w) = stream.into_split();
+        let mut cert_store = RootCertStore::empty();
+        cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+        let config = ClientConfig::builder()
+            .with_root_certificates(cert_store)
+            .with_no_client_auth();
+
+        let connector = TlsConnector::from(Arc::new(config));
+
+        let stream = TcpStream::connect(addr).await?;
+
+        let server_name = ServerName::try_from(server_addr.0.clone())?;
+
+        let stream = connector.connect(server_name, stream).await?;
+
+        let (r, w) = split(stream);
         let mut reader = BufReader::new(r);
         let mut writer = BufWriter::new(w);
 
@@ -187,7 +226,7 @@ impl ControlConnection {
                     server_addr,
                     ports,
                     reader,
-                    writer,
+                    _writer: writer,
                 })
             }
         }

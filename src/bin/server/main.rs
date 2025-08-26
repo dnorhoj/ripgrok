@@ -1,12 +1,15 @@
 use std::net::SocketAddr;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use ::anyhow::Context;
 use ::dashmap::DashMap;
-use ::tokio::io::{AsyncReadExt, copy_bidirectional};
+use ::tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, copy_bidirectional};
 use ::tokio::net::{TcpListener, TcpStream};
 use ::tokio::time::timeout;
+use ::tokio_rustls::TlsAcceptor;
+use ::tokio_rustls::rustls::ServerConfig;
+use ::tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use ::tracing_subscriber::FmtSubscriber;
 use ripgrok::ClientHello;
 
@@ -20,7 +23,7 @@ mod tunnel_listener;
 static PENDING_TUNNEL_CONNS: LazyLock<DashMap<u64, TcpStream>> = LazyLock::new(|| DashMap::new());
 
 async fn handle_new_connection(
-    mut stream: TcpStream,
+    mut stream: impl AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
     addr: SocketAddr,
     public_host: Option<String>,
 ) -> anyhow::Result<()> {
@@ -58,11 +61,25 @@ async fn handle_new_connection(
     Ok(())
 }
 
+fn load_certs<'a>() -> Vec<CertificateDer<'static>> {
+    todo!()
+}
+
+fn load_key() -> PrivateKeyDer<'static> {
+    todo!()
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing::subscriber::set_global_default(FmtSubscriber::default())?;
 
     let config = Config::load()?;
+
+    let tls_config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(load_certs(), load_key())?;
+
+    let acceptor = TlsAcceptor::from(Arc::new(tls_config));
 
     let listener = TcpListener::bind((config.bind.host, config.bind.port)).await?;
 
@@ -71,10 +88,18 @@ async fn main() -> anyhow::Result<()> {
     loop {
         let (stream, addr) = listener.accept().await?;
         let public_host = config.bind.public_host.clone();
+        let acceptor = acceptor.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_new_connection(stream, addr, public_host).await {
-                tracing::warn!(?addr, "Failed to handle connection: {}", e);
+            match acceptor.accept(stream).await {
+                Ok(tls_stream) => {
+                    if let Err(e) = handle_new_connection(tls_stream, addr, public_host).await {
+                        tracing::warn!(?addr, "Failed to handle connection: {}", e);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(?addr, "TLS accept error: {}", e);
+                }
             }
         });
     }

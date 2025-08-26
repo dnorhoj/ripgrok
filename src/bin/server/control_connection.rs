@@ -4,14 +4,13 @@ use std::time::Duration;
 
 use ::anyhow::Context;
 use ::tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
-use ::tokio::net::TcpStream;
-use ::tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use ::tokio::select;
 use ::tokio::sync::{Mutex, mpsc};
 use ::tokio::task::JoinSet;
 use ::tokio::time::timeout;
 use ::tokio_util::sync::CancellationToken;
 use ripgrok::{ClientControlHello, ServerControlCommand, ServerControlHello};
+use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf, split};
 
 use crate::tunnel_listener::TunnelListener;
 
@@ -28,7 +27,10 @@ impl ControlConnection {
         }
     }
 
-    async fn start_reader_task(&self, mut stream: BufReader<OwnedReadHalf>) -> () {
+    async fn start_reader_task(
+        &self,
+        mut stream: BufReader<ReadHalf<impl AsyncRead + Send + Sync + 'static>>,
+    ) -> () {
         let token = self.token.clone();
 
         tokio::spawn(async move {
@@ -60,7 +62,7 @@ impl ControlConnection {
 
     async fn start_writer_queue(
         &self,
-        stream: Arc<Mutex<BufWriter<OwnedWriteHalf>>>,
+        stream: Arc<Mutex<BufWriter<WriteHalf<impl AsyncWrite + Send + Sync + 'static>>>>,
     ) -> mpsc::Sender<ServerControlCommand> {
         let (tx, mut rx) = tokio::sync::mpsc::channel(128);
 
@@ -104,8 +106,12 @@ impl ControlConnection {
         tx
     }
 
-    pub async fn run(self, stream: TcpStream, public_host: Option<String>) -> anyhow::Result<()> {
-        let (read_half, write_half) = stream.into_split();
+    pub async fn run(
+        self,
+        stream: impl AsyncRead + AsyncWrite + Send + Sync + 'static,
+        public_host: Option<String>,
+    ) -> anyhow::Result<()> {
+        let (read_half, write_half) = split(stream);
         let mut read_buf = BufReader::new(read_half);
         let write_buf = Arc::new(Mutex::new(BufWriter::new(write_half)));
 
