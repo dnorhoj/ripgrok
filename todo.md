@@ -1,0 +1,1 @@
+- When server errors on creation of tunnel (e.g. when binding to port 80 when not root) it does not close connection - i think a ref to TcpStream might be kept somewhere

@@ -2,7 +2,7 @@ use std::{fmt::Display, str::FromStr};
 
 use ::serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TunnelType {
     Tcp,
     Ssl,
@@ -79,7 +79,7 @@ impl FromStr for TunnelSpecifier {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ResolvedTunnelSpecifier {
     pub tunnel_type: TunnelType,
     pub client_port: u16,

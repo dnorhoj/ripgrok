@@ -1,0 +1,29 @@
+[package]
+name = "ripgrok-server"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["web-server"]
+
+web-server = ["dep:axum"]
+
+[dependencies]
+anyhow = "1.0.99"
+async-trait = "0.1.89"
+axum = { version = "0.8.4", optional = true }
+base64 = "0.22.1"
+config = "0.15.14"
+dashmap = "6.1.0"
+futures = "0.3.31"
+rustls-pemfile = "2.2.0"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.142"
+tokio = { version = "1.47.1", features = ["full"] }
+tokio-rustls = "0.26.2"
+tokio-util = "0.7.16"
+tower = "0.5.2"
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"
+
+ripgrok-common = { path = "../common" }

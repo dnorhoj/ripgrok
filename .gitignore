@@ -1,1 +1,4 @@
 /target
+ssl/*.pem
+server_config.toml
+client_config.toml
