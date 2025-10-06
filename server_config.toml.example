@@ -1,0 +1,18 @@
+[bind]
+#host = "0.0.0.0"
+#port = 7267
+
+[tls]
+fullchain_file = "ssl/fullchain.pem"
+#fullchain_b64 = "..."
+key_file = "ssl/key.pem"
+#key_b64 = "..."
+
+[general]
+#public_host = ""
+#allowed_ports = [ 1234, 8080 ]
+#token = "changeme"
+
+[web_server.auth]
+username = "admin"
+password = "changeme"

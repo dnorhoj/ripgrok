@@ -1,0 +1,10 @@
+[server]
+host = "localhost"
+#port = 7267
+
+[tls]
+cert_file = "ssl/fullchain.pem"
+#cert_b64 = "..."
+
+[general]
+token = "changeme"
